@@ -16,6 +16,7 @@ rustls = { version = "0.23", default-features = false, optional = true, features
 rustls-native-certs = { version = "0.8", optional = true }
 rustls-pemfile = { version = "2", optional = true }
 tokio-rustls = { version = "0.26", default-features = false, optional = true, features = ["logging", "ring", "tls12"] }
+socket2 = "0.6"
 
 [features]
 default = ["tls"]
@@ -23,6 +24,8 @@ tls = ["dep:rustls", "dep:rustls-native-certs", "dep:rustls-pemfile", "dep:tokio
 
 [dev-dependencies]
 tokio = { version = "1", features = ["rt-multi-thread", "test-util"] }
+# `all` exposes the keepalive getters the socket tests read back.
+socket2 = { version = "0.6", features = ["all"] }
 
 [lints.rust]
 unsafe_code = "forbid"

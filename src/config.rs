@@ -49,6 +49,10 @@ pub struct Config {
     /// TLS settings. Ignored when `plaintext` is set.
     #[cfg(feature = "tls")]
     pub tls: crate::tls::Tls,
+    /// TCP keepalive idle interval. `None` selects 15 seconds;
+    /// `Some(Duration::ZERO)` disables keepalive; any other value is the idle
+    /// interval.
+    pub keepalive: Option<Duration>,
     /// Bounds dialling, the TLS handshake, and login. Zero selects 10 seconds.
     pub connect_timeout: Duration,
     /// Bounds one command end to end. Zero selects 10 seconds.
@@ -90,6 +94,7 @@ impl Config {
             plaintext: defaults.plaintext,
             #[cfg(feature = "tls")]
             tls: defaults.tls.clone(),
+            keepalive: defaults.keepalive,
             connect_timeout: defaults.connect_timeout,
             command_timeout: defaults.command_timeout,
             cancel_grace: defaults.cancel_grace,
@@ -206,6 +211,7 @@ impl Default for Config {
             plaintext: false,
             #[cfg(feature = "tls")]
             tls: crate::tls::Tls::System,
+            keepalive: None,
             connect_timeout: DEFAULT_CONNECT_TIMEOUT,
             command_timeout: DEFAULT_COMMAND_TIMEOUT,
             cancel_grace: DEFAULT_CANCEL_GRACE,
@@ -228,6 +234,7 @@ impl fmt::Debug for Config {
             .field("username", &self.username)
             .field("password", &"<redacted>")
             .field("plaintext", &self.plaintext)
+            .field("keepalive", &self.keepalive)
             .field("connect_timeout", &self.connect_timeout)
             .field("command_timeout", &self.command_timeout)
             .field("cancel_grace", &self.cancel_grace)
@@ -308,6 +315,16 @@ mod tests {
         assert_eq!(normalized.port, 9999);
         assert_eq!(normalized.connect_timeout, Duration::from_secs(1));
         assert_eq!(normalized.max_word_bytes, 128);
+    }
+
+    #[test]
+    fn keepalive_is_unset_by_default_and_survives_normalizing() {
+        let mut config = Config::new("router", "api", b"secret".to_vec());
+        config.plaintext = true;
+        assert_eq!(config.keepalive, None);
+        config.keepalive = Some(Duration::from_secs(42));
+        let normalized = config.normalized().unwrap();
+        assert_eq!(normalized.keepalive, Some(Duration::from_secs(42)));
     }
 
     #[cfg(not(feature = "tls"))]

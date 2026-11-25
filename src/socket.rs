@@ -2,6 +2,7 @@
 
 use std::time::Duration;
 
+use socket2::{SockRef, TcpKeepalive};
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::net::TcpStream;
 
@@ -89,6 +90,7 @@ pub(crate) struct DialOptions {
     pub(crate) host: String,
     #[cfg(feature = "tls")]
     pub(crate) plaintext: bool,
+    pub(crate) keepalive: Option<Duration>,
     pub(crate) connect_timeout: Duration,
     #[cfg(feature = "tls")]
     pub(crate) tls: crate::tls::Tls,
@@ -102,6 +104,7 @@ impl DialOptions {
             host: config.host.clone(),
             #[cfg(feature = "tls")]
             plaintext: config.plaintext,
+            keepalive: config.keepalive,
             connect_timeout: config.connect_timeout,
             #[cfg(feature = "tls")]
             tls: config.tls.clone(),
@@ -132,6 +135,7 @@ pub(crate) async fn dial(options: &DialOptions) -> Result<(IoStream, Duration)> 
             }
         })?;
     let _ = stream.set_nodelay(true);
+    apply_keepalive(&stream, options.keepalive)?;
 
     #[cfg(feature = "tls")]
     {
@@ -141,6 +145,47 @@ pub(crate) async fn dial(options: &DialOptions) -> Result<(IoStream, Duration)> 
         }
     }
     Ok((IoStream::Plain(stream), started.elapsed()))
+}
+
+/// The idle interval used when [`crate::Config::keepalive`] is `None`.
+const DEFAULT_KEEPALIVE_IDLE: Duration = Duration::from_secs(15);
+
+/// Apply the configured TCP keepalive to a connected socket.
+fn apply_keepalive(stream: &TcpStream, keepalive: Option<Duration>) -> Result<()> {
+    let socket = SockRef::from(stream);
+    let applied = match keepalive {
+        Some(Duration::ZERO) => socket.set_keepalive(false),
+        Some(idle) => socket.set_tcp_keepalive(&keepalive_params(idle)),
+        None => socket.set_tcp_keepalive(&keepalive_params(DEFAULT_KEEPALIVE_IDLE)),
+    };
+    applied.map_err(|error| connection("keepalive", error))
+}
+
+/// Keepalive parameters with `idle` as both the idle time and, where the
+/// platform exposes it, the probe interval.
+fn keepalive_params(idle: Duration) -> TcpKeepalive {
+    let params = TcpKeepalive::new().with_time(idle);
+    #[cfg(any(
+        target_os = "android",
+        target_os = "dragonfly",
+        target_os = "emscripten",
+        target_os = "freebsd",
+        target_os = "fuchsia",
+        target_os = "illumos",
+        target_os = "ios",
+        target_os = "visionos",
+        target_os = "linux",
+        target_os = "macos",
+        target_os = "netbsd",
+        target_os = "tvos",
+        target_os = "watchos",
+        target_os = "windows",
+        target_os = "cygwin",
+        target_os = "nuttx",
+        all(target_os = "wasi", not(target_env = "p1")),
+    ))]
+    let params = params.with_interval(idle);
+    params
 }
 
 #[cfg(feature = "tls")]
@@ -208,5 +253,81 @@ mod tests {
         let mut reply = [0u8; 4];
         reader.read_exact(&mut reply).await.unwrap();
         assert_eq!(&reply, b"pong");
+    }
+
+    /// A connected client stream and the local peer it dialled.
+    async fn connect_pair() -> (TcpStream, TcpStream) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let client = TcpStream::connect(listener.local_addr().unwrap())
+            .await
+            .unwrap();
+        let (server, _) = listener.accept().await.unwrap();
+        (client, server)
+    }
+
+    #[tokio::test]
+    async fn a_missing_keepalive_setting_enables_keepalive_with_a_15_second_idle() {
+        let (client, _server) = connect_pair().await;
+        apply_keepalive(&client, None).unwrap();
+        let socket = SockRef::from(&client);
+        assert!(socket.keepalive().unwrap());
+        #[cfg(not(any(
+            windows,
+            target_os = "haiku",
+            target_os = "openbsd",
+            target_os = "vita"
+        )))]
+        assert_eq!(
+            socket.tcp_keepalive_time().unwrap(),
+            Duration::from_secs(15)
+        );
+        #[cfg(any(
+            target_os = "android",
+            target_os = "dragonfly",
+            target_os = "emscripten",
+            target_os = "freebsd",
+            target_os = "fuchsia",
+            target_os = "illumos",
+            target_os = "ios",
+            target_os = "visionos",
+            target_os = "linux",
+            target_os = "macos",
+            target_os = "netbsd",
+            target_os = "tvos",
+            target_os = "watchos",
+            target_os = "windows",
+            target_os = "cygwin",
+            target_os = "nuttx",
+            all(target_os = "wasi", not(target_env = "p1")),
+        ))]
+        assert_eq!(
+            socket.tcp_keepalive_interval().unwrap(),
+            Duration::from_secs(15)
+        );
+    }
+
+    #[tokio::test]
+    async fn a_zero_keepalive_setting_disables_keepalive() {
+        let (client, _server) = connect_pair().await;
+        apply_keepalive(&client, Some(Duration::ZERO)).unwrap();
+        assert!(!SockRef::from(&client).keepalive().unwrap());
+    }
+
+    #[tokio::test]
+    async fn an_explicit_keepalive_setting_becomes_the_idle_interval() {
+        let (client, _server) = connect_pair().await;
+        apply_keepalive(&client, Some(Duration::from_secs(42))).unwrap();
+        let socket = SockRef::from(&client);
+        assert!(socket.keepalive().unwrap());
+        #[cfg(not(any(
+            windows,
+            target_os = "haiku",
+            target_os = "openbsd",
+            target_os = "vita"
+        )))]
+        assert_eq!(
+            socket.tcp_keepalive_time().unwrap(),
+            Duration::from_secs(42)
+        );
     }
 }
