@@ -41,7 +41,7 @@ mod transport;
 mod wire;
 
 pub use cancel::Cancel;
-pub use client::{Client, State, Stream};
+pub use client::{CallOptions, Client, State, Stream, StreamOptions};
 pub use config::{Config, DEFAULT_PLAINTEXT_PORT, DEFAULT_TLS_PORT};
 pub use error::{Error, Result};
 pub use query::Expr;
@@ -63,12 +63,17 @@ pub async fn connect(config: Config) -> Result<Client> {
     client::connect(config).await
 }
 
-/// Like [`connect`], with a caller-supplied cancellation token.
+/// Like [`connect`], with a per-call deadline override and cancellation
+/// token.
+///
+/// `options.timeout` bounds the dial and login exchange end to end in place of
+/// [`Config::connect_timeout`]; `options.cancel` aborts it early.
 ///
 /// # Errors
 ///
-/// The same failures as [`connect`], plus [`Error::Cancelled`] when `cancel`
-/// fires before the login exchange finishes.
-pub async fn connect_cancellable(config: Config, cancel: &Cancel) -> Result<Client> {
-    client::connect_cancellable(config, cancel).await
+/// The same failures as [`connect`], plus [`Error::InvalidRequest`] when
+/// `options.timeout` is [`std::time::Duration::ZERO`] and [`Error::Cancelled`]
+/// when the token is already cancelled.
+pub async fn connect_with(config: Config, options: &CallOptions) -> Result<Client> {
+    client::connect_with(config, options).await
 }

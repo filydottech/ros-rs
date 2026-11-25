@@ -365,13 +365,14 @@ impl Conn {
         &self,
         words: &[String],
         cancel: &Cancel,
+        timeout: Option<Duration>,
         op: &'static str,
     ) -> Result<CommandResult> {
-        let submission = self.core.submit(words, false, cancel, op).await?;
+        let submission = self.core.submit(words, false, cancel, None, op).await?;
         let Submission {
             tag, completion, ..
         } = submission;
-        let timeout = self.core.command_timeout();
+        let timeout = timeout.unwrap_or_else(|| self.core.command_timeout());
         let outcome = tokio::select! {
             outcome = completion => outcome,
             () = cancel.cancelled() => {
@@ -408,9 +409,11 @@ impl Conn {
         &self,
         words: &[String],
         cancel: &Cancel,
+        overrides: (Option<usize>, Option<usize>),
         op: &'static str,
     ) -> Result<(String, Queue)> {
-        let submission = self.core.submit(words, true, cancel, op).await?;
+        let bounds = self.core.stream_bounds(overrides)?;
+        let submission = self.core.submit(words, true, cancel, bounds, op).await?;
         match submission.queue {
             Some(queue) => Ok((submission.tag, queue)),
             None => Err(Error::Protocol {
@@ -484,6 +487,7 @@ impl Core {
         words: &[String],
         streaming: bool,
         cancel: &Cancel,
+        bounds: Option<(usize, usize)>,
         op: &'static str,
     ) -> Result<Submission> {
         if cancel.is_cancelled() {
@@ -508,8 +512,11 @@ impl Core {
 
             state.counter = state.counter.wrapping_add(1);
             let tag = state.counter.to_string();
-            let queue =
-                streaming.then(|| Queue::new(state.stream_max_records, state.stream_max_bytes));
+            let queue = streaming.then(|| {
+                let (max_records, max_bytes) =
+                    bounds.unwrap_or((state.stream_max_records, state.stream_max_bytes));
+                Queue::new(max_records, max_bytes)
+            });
             let mut tagged = Vec::with_capacity(words.len() + 1);
             tagged.extend_from_slice(words);
             tagged.push(format!(".tag={tag}"));
@@ -569,6 +576,31 @@ impl Core {
             Ok(Err(WriteFailure::Fault(fault))) => Err(fault.to_error(op)),
             Err(_receiver_error) => Err(self.terminal_or_closed().to_error(op)),
         }
+    }
+
+    /// Resolve per-stream queue overrides against the connection defaults.
+    ///
+    /// The byte bound cannot exceed the connection's aggregate budget: one
+    /// queue larger than what the pause accounting tracks would defeat it.
+    fn stream_bounds(
+        &self,
+        (records, bytes): (Option<usize>, Option<usize>),
+    ) -> Result<Option<(usize, usize)>> {
+        if records.is_none() && bytes.is_none() {
+            return Ok(None);
+        }
+        let state = self.state.lock().unwrap();
+        let records = records.unwrap_or(state.stream_max_records);
+        let bytes = bytes.unwrap_or(state.stream_max_bytes);
+        if bytes > state.max_buffered_stream_bytes {
+            return Err(Error::InvalidRequest {
+                detail: format!(
+                    "stream byte bound {bytes} exceeds the connection budget {}",
+                    state.max_buffered_stream_bytes
+                ),
+            });
+        }
+        Ok(Some((records, bytes)))
     }
 
     fn command_timeout(&self) -> Duration {

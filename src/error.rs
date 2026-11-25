@@ -25,8 +25,8 @@ pub enum Error {
         /// What is wrong with the configuration. Never contains a credential.
         detail: String,
     },
-    /// The command path, attributes, proplist, or query words were invalid.
-    /// Nothing was sent.
+    /// The command path, attributes, proplist, query words, or per-call
+    /// options were invalid. Nothing was sent.
     InvalidRequest {
         /// Which field was rejected, and why.
         detail: String,

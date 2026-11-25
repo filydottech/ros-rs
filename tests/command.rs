@@ -8,7 +8,7 @@ use std::time::Duration;
 
 use tokio::sync::mpsc;
 
-use ros_rs::{Cancel, Error, Request, connect};
+use ros_rs::{CallOptions, Cancel, Error, Request, connect};
 use support::{config, serve, tag_of, within};
 
 #[tokio::test]
@@ -132,7 +132,11 @@ async fn cancelling_sends_one_cancel_and_leaves_the_connection_usable() {
         let cancel = cancel.clone();
         async move {
             client
-                .command_cancellable("/tool/ping", &Request::new(), &cancel)
+                .command_with(
+                    "/tool/ping",
+                    &Request::new(),
+                    &CallOptions::new().cancel(cancel),
+                )
                 .await
         }
     });

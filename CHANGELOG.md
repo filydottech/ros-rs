@@ -10,14 +10,22 @@ All notable changes to this crate are recorded here. The format follows
 
 ### Added
 
-- `connect` and `connect_cancellable`: one authenticated RouterOS API
-  connection over TCP or TLS, with tag-routed multiplexed commands.
-- `Client::command`: one command, every `!re` record in arrival order, the
-  terminating `!done` attributes, and `Error::Trap` with those attributes.
-- `Client::stream`: a long-running command delivered through a bounded queue
-  that pauses the reader when the caller falls behind.
+- `connect` and `connect_with`: one authenticated RouterOS API connection over
+  TCP or TLS, with tag-routed multiplexed commands.
+- `Client::command` and `Client::command_with`: one command, every `!re` record
+  in arrival order, the terminating `!done` attributes, and `Error::Trap` with
+  those attributes; the `_with` form takes a per-call deadline and cancellation
+  token.
+- `Client::stream` and `Client::stream_with`: a long-running command delivered
+  through a bounded queue that pauses the reader when the caller falls behind;
+  the `_with` form overrides the stream queue bounds and takes a cancellation
+  token.
+- `CallOptions` and `StreamOptions`, which carry a per-call deadline,
+  cancellation token, or stream queue override in one struct.
 - Cancellation through `Cancel`, `/cancel =tag=` on the wire, and zombie tags
   that absorb late replies instead of desynchronizing the connection.
+- TCP keepalive, on by default with a 15-second idle interval; set
+  `Config::keepalive` to `Some(Duration::ZERO)` to turn it off.
 - `Client::reconnect`, which ends the old generation and never replays work.
 - `Client::done`, which resolves when the current generation ends, so a caller
   can abandon its work in a `select!` instead of polling `state`.

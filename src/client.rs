@@ -1,6 +1,7 @@
 //! The public client: lifecycle, commands, streams, and reconnect.
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use tokio::sync::RwLock;
 
@@ -47,6 +48,123 @@ impl State {
     }
 }
 
+/// Per-call options for [`crate::connect_with`], [`Client::command_with`],
+/// and [`Client::reconnect_with`].
+///
+/// The default carries no deadline override and no cancellation token, so a
+/// `_with` method behaves exactly like its plain counterpart until a field is
+/// set.
+#[derive(Clone, Debug, Default)]
+pub struct CallOptions {
+    /// Bounds this call end to end. `None` uses `Config::command_timeout`,
+    /// or `Config::connect_timeout` for `connect_with`.
+    pub timeout: Option<Duration>,
+    /// Cancels this call. `None` means nothing outside can cancel it.
+    pub cancel: Option<Cancel>,
+}
+
+impl CallOptions {
+    /// No deadline override and no cancellation token.
+    #[must_use]
+    pub fn new() -> Self {
+        CallOptions::default()
+    }
+
+    /// Bound the call end to end.
+    #[must_use]
+    pub fn timeout(mut self, timeout: Duration) -> Self {
+        self.timeout = Some(timeout);
+        self
+    }
+
+    /// Cancel the call when `cancel` fires.
+    #[must_use]
+    pub fn cancel(mut self, cancel: Cancel) -> Self {
+        self.cancel = Some(cancel);
+        self
+    }
+
+    /// Reject a zero deadline before anything reaches the wire.
+    fn validate(&self) -> Result<()> {
+        if self.timeout.is_some_and(|timeout| timeout.is_zero()) {
+            return Err(Error::InvalidRequest {
+                detail: "timeout must be greater than zero".to_owned(),
+            });
+        }
+        Ok(())
+    }
+
+    /// The caller's token, or a fresh token nothing can cancel.
+    fn token(&self) -> Cancel {
+        self.cancel.clone().unwrap_or_default()
+    }
+}
+
+/// Per-stream options for [`Client::stream_with`].
+///
+/// A stream runs until it is cancelled, so there is no timeout here:
+/// [`StreamOptions::cancel`] or [`crate::Stream::close`] ends it. Queue bounds
+/// left unset fall back to [`Config::stream_max_records`] and
+/// [`Config::stream_max_bytes`].
+#[derive(Clone, Debug, Default)]
+pub struct StreamOptions {
+    /// Cancels this stream. `None` means nothing outside can cancel it.
+    pub cancel: Option<Cancel>,
+    /// Overrides `Config::stream_max_records` for this stream.
+    pub records: Option<usize>,
+    /// Overrides `Config::stream_max_bytes` for this stream.
+    pub bytes: Option<usize>,
+}
+
+impl StreamOptions {
+    /// Every override unset and no cancellation token.
+    #[must_use]
+    pub fn new() -> Self {
+        StreamOptions::default()
+    }
+
+    /// Cancel the stream when `cancel` fires.
+    #[must_use]
+    pub fn cancel(mut self, cancel: Cancel) -> Self {
+        self.cancel = Some(cancel);
+        self
+    }
+
+    /// Bound this stream's queued record count.
+    #[must_use]
+    pub fn records(mut self, records: usize) -> Self {
+        self.records = Some(records);
+        self
+    }
+
+    /// Bound this stream's queued payload bytes.
+    #[must_use]
+    pub fn bytes(mut self, bytes: usize) -> Self {
+        self.bytes = Some(bytes);
+        self
+    }
+
+    /// Reject a zero bound before anything reaches the wire.
+    fn validate(&self) -> Result<()> {
+        if self.records == Some(0) {
+            return Err(Error::InvalidRequest {
+                detail: "stream records must be greater than zero".to_owned(),
+            });
+        }
+        if self.bytes == Some(0) {
+            return Err(Error::InvalidRequest {
+                detail: "stream bytes must be greater than zero".to_owned(),
+            });
+        }
+        Ok(())
+    }
+
+    /// The caller's token, or a fresh token nothing can cancel.
+    fn token(&self) -> Cancel {
+        self.cancel.clone().unwrap_or_default()
+    }
+}
+
 /// One `RouterOS` API connection.
 ///
 /// The client is cheap to share across tasks (`Arc<Client>`), and every
@@ -65,6 +183,25 @@ struct ClientInner {
     terminal: Option<Error>,
 }
 
+/// Dial and log in, bounded by `timeout` when the caller set one.
+async fn open_with_timeout(
+    dial_options: crate::socket::DialOptions,
+    config: &Config,
+    cancel: &Cancel,
+    timeout: Option<Duration>,
+) -> Result<Conn> {
+    let open = crate::transport::open(dial_options, config, cancel);
+    match timeout {
+        Some(timeout) => tokio::time::timeout(timeout, open)
+            .await
+            .map_err(|_elapsed| Error::Timeout {
+                phase: "connect",
+                duration: timeout,
+            })?,
+        None => open.await,
+    }
+}
+
 /// Dial, log in, and return a ready client.
 ///
 /// TLS is the default: port [`crate::DEFAULT_TLS_PORT`], the certificate
@@ -80,18 +217,25 @@ struct ClientInner {
 /// [`Error::Connection`] for a failed dial or read, and [`Error::Login`] when
 /// the router rejects the credentials.
 pub async fn connect(config: Config) -> Result<Client> {
-    connect_cancellable(config, &Cancel::new()).await
+    connect_with(config, &CallOptions::new()).await
 }
 
-/// Like [`crate::connect`], with a caller-supplied cancellation token.
+/// Like [`connect`], with a per-call deadline override and cancellation token.
+///
+/// `options.timeout` bounds the dial and login exchange end to end in place of
+/// [`Config::connect_timeout`]; `options.cancel` aborts it early.
+///
 /// # Errors
 ///
-/// The categories are those of [`crate::connect`], plus [`Error::Cancelled`] when the
+/// The categories are those of [`connect`], plus [`Error::InvalidRequest`] when
+/// `options.timeout` is [`Duration::ZERO`] and [`Error::Cancelled`] when the
 /// token is already cancelled.
-pub async fn connect_cancellable(config: Config, cancel: &Cancel) -> Result<Client> {
+pub async fn connect_with(config: Config, options: &CallOptions) -> Result<Client> {
+    options.validate()?;
     let config = config.normalized()?;
     let dial_options = crate::socket::DialOptions::from_config(&config);
-    let conn = crate::transport::open(dial_options, &config, cancel).await?;
+    let cancel = options.token();
+    let conn = open_with_timeout(dial_options, &config, &cancel, options.timeout).await?;
     let generation = Arc::new(conn);
     let mut config = config;
     config.forget_password();
@@ -118,24 +262,30 @@ impl Client {
     /// transport categories [`Error::Closed`], [`Error::Protocol`], and
     /// [`Error::Connection`].
     pub async fn command(&self, path: &str, request: &Request) -> Result<CommandResult> {
-        self.command_cancellable(path, request, &Cancel::new())
-            .await
+        self.command_with(path, request, &CallOptions::new()).await
     }
 
-    /// Like [`Client::command`], but cancelling in flight asks the router to
-    /// cancel the command and resolves with [`Error::Cancelled`].
+    /// Like [`Client::command`], with a per-call deadline override in place of
+    /// [`Config::command_timeout`] and an optional cancellation token.
+    ///
+    /// Cancelling in flight asks the router to cancel the command and resolves
+    /// with [`Error::Cancelled`].
     /// # Errors
     ///
-    /// The categories are those of [`Client::command`].
-    pub async fn command_cancellable(
+    /// The categories are those of [`Client::command`], plus
+    /// [`Error::InvalidRequest`] when `options.timeout` is [`Duration::ZERO`].
+    pub async fn command_with(
         &self,
         path: &str,
         request: &Request,
-        cancel: &Cancel,
+        options: &CallOptions,
     ) -> Result<CommandResult> {
+        options.validate()?;
         let words = request.sentence_words(path)?;
         let conn = self.conn_or_fail().await?;
-        conn.command(&words, cancel, "command").await
+        let cancel = options.token();
+        conn.command(&words, &cancel, options.timeout, "command")
+            .await
     }
 
     /// Receive the `!re` records of a long-running command through a bounded
@@ -148,28 +298,35 @@ impl Client {
     /// [`Error::Protocol`], and [`Error::Connection`]. A `!trap` terminates the
     /// returned stream rather than this call.
     pub async fn stream(&self, path: &str, request: &Request) -> Result<crate::Stream> {
-        self.stream_cancellable(path, request, &Cancel::new()).await
+        self.stream_with(path, request, &StreamOptions::new()).await
     }
 
-    /// Like [`Client::stream`], with a caller-supplied cancellation token.
+    /// Like [`Client::stream`], with per-stream queue bounds in place of
+    /// [`Config::stream_max_records`] and [`Config::stream_max_bytes`], plus an
+    /// optional cancellation token.
     /// # Errors
     ///
     /// The categories are those of [`Client::stream`], plus
-    /// [`Error::Cancelled`] when the token is already cancelled.
-    pub async fn stream_cancellable(
+    /// [`Error::InvalidRequest`] for a zero or oversized bound or a bound above
+    /// the connection's `max_buffered_stream_bytes`.
+    pub async fn stream_with(
         &self,
         path: &str,
         request: &Request,
-        cancel: &Cancel,
+        options: &StreamOptions,
     ) -> Result<crate::Stream> {
+        options.validate()?;
         let words = request.sentence_words(path)?;
         let conn = self.conn_or_fail().await?;
-        let (pending_tag, queue) = conn.stream(&words, cancel, "stream").await?;
+        let cancel = options.token();
+        let (pending_tag, queue) = conn
+            .stream(&words, &cancel, (options.records, options.bytes), "stream")
+            .await?;
         Ok(crate::Stream {
             inner: Arc::new(queue),
             conn,
             pending_tag,
-            cancel: cancel.clone(),
+            cancel,
             closed: false,
         })
     }
@@ -206,15 +363,18 @@ impl Client {
     /// concurrent reconnect, and the dial and login categories of
     /// [`crate::connect`].
     pub async fn reconnect(&self, config: Config) -> Result<()> {
-        self.reconnect_cancellable(config, &Cancel::new()).await
+        self.reconnect_with(config, &CallOptions::new()).await
     }
 
-    /// Like [`Client::reconnect`], with a caller-supplied cancellation token.
+    /// Like [`Client::reconnect`], with a per-call deadline override and
+    /// cancellation token for the new dial and login.
     /// # Errors
     ///
     /// The categories are those of [`Client::reconnect`], plus
-    /// [`Error::Cancelled`] when the token is already cancelled.
-    pub async fn reconnect_cancellable(&self, config: Config, cancel: &Cancel) -> Result<()> {
+    /// [`Error::InvalidRequest`] when `options.timeout` is [`Duration::ZERO`].
+    pub async fn reconnect_with(&self, config: Config, options: &CallOptions) -> Result<()> {
+        options.validate()?;
+        let cancel = options.token();
         let old = {
             let mut inner = self.inner.write().await;
             if inner.closed {
@@ -240,7 +400,7 @@ impl Client {
         }
 
         let dial_options = crate::socket::DialOptions::from_config(&config);
-        let opened = crate::transport::open(dial_options, &config, cancel).await;
+        let opened = open_with_timeout(dial_options, &config, &cancel, options.timeout).await;
 
         let mut inner = self.inner.write().await;
         inner.reconnecting = false;

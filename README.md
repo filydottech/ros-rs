@@ -138,8 +138,8 @@ paused reader behind.
 
 ## Cancellation and timeouts
 
-`Cancel` is a cheap, cloneable token. `command_cancellable` and
-`stream_cancellable` accept one. Cancelling a command in flight sends
+`Cancel` is a cheap, cloneable token. `command_with` and `stream_with` accept
+one through their options struct. Cancelling a command in flight sends
 `/cancel =tag=<n>`, resolves the command with `Error::Cancelled`, and leaves
 the connection usable. Cancelling while a stream is being submitted fails that
 submission with `Error::Cancelled`; a cancellation that wins before the writer
@@ -149,7 +149,7 @@ that has already been returned, use `Stream::close`, or drop it.
 ```rust
 use std::time::Duration;
 
-use ros_rs::{Cancel, Client, Error, Request, Result};
+use ros_rs::{CallOptions, Cancel, Client, Error, Request, Result};
 
 async fn ping(client: &Client) -> Result<()> {
     let cancel = Cancel::new();
@@ -160,7 +160,11 @@ async fn ping(client: &Client) -> Result<()> {
     });
 
     match client
-        .command_cancellable("/tool/ping", &Request::new(), &cancel)
+        .command_with(
+            "/tool/ping",
+            &Request::new(),
+            &CallOptions::new().cancel(cancel),
+        )
         .await
     {
         Err(Error::Cancelled) => {}
@@ -172,10 +176,39 @@ async fn ping(client: &Client) -> Result<()> {
 ```
 
 `Config::command_timeout` bounds one command end to end; zero selects 10
-seconds. On expiry the client sends the same cancel and returns
-`Error::Timeout { phase: "command", .. }`. `Config::cancel_grace` bounds how
-long a cancelled tag is remembered before its late replies are absorbed as a
-zombie; zero selects 2 seconds.
+seconds, and `CallOptions::timeout` overrides it for one call. On expiry the
+client sends the same cancel and returns `Error::Timeout { phase: "command",
+.. }`. `Config::cancel_grace` bounds how long a cancelled tag is remembered
+before its late replies are absorbed as a zombie; zero selects 2 seconds.
+
+## Per-call options
+
+`command_with`, `stream_with`, `connect_with`, and `reconnect_with` take an
+options struct instead of extra parameters. `CallOptions::timeout` overrides
+`Config::command_timeout` for one call, `CallOptions::cancel` and
+`StreamOptions::cancel` attach a `Cancel`, and `StreamOptions::records` and
+`StreamOptions::bytes` override the queue bounds for one stream, which still
+counts against the connection budget. A deadline or queue bound of zero, or a
+byte bound above `max_buffered_stream_bytes`, is `Error::InvalidRequest`
+before anything is sent.
+
+```rust
+use std::time::Duration;
+
+use ros_rs::{CallOptions, Request};
+
+async fn short_command(client: &ros_rs::Client) -> ros_rs::Result<()> {
+    let result = client
+        .command_with(
+            "/interface/print",
+            &Request::new(),
+            &CallOptions::new().timeout(Duration::from_secs(2)),
+        )
+        .await?;
+    println!("{}", result.records.len());
+    Ok(())
+}
+```
 
 ## TLS
 
@@ -265,12 +298,16 @@ convenience predicates.
 
 ## Limits
 
-Every limit has a default; set a field to zero to select it explicitly. An
-out-of-range limit, or a `stream_max_bytes` above `max_buffered_stream_bytes`,
-is rejected with `Error::Config` before any socket is opened.
+Every timeout and limit in the table takes its documented default when the
+field is zero, except `Config::keepalive`: `None` selects the default
+15-second TCP keepalive interval and `Some(Duration::ZERO)` turns keepalive
+off. An out-of-range limit, or a `stream_max_bytes` above
+`max_buffered_stream_bytes`, is rejected with `Error::Config` before any socket
+is opened.
 
 | Setting | Default |
 | --- | ---: |
+| `keepalive` | 15 s, on |
 | `connect_timeout` | 10 s |
 | `command_timeout` | 10 s |
 | `cancel_grace` | 2 s |

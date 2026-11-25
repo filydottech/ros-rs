@@ -11,7 +11,7 @@
 
 use std::time::Duration;
 
-use ros_rs::{Cancel, Config, Error, Request, connect};
+use ros_rs::{Cancel, Config, Error, Request, StreamOptions, connect};
 
 /// Build a config from `ROS_*`. Panics when the required variables are absent,
 /// which only happens if the ignored tests were requested without them.
@@ -120,7 +120,11 @@ async fn a_stream_cancels_cleanly_and_releases_its_tag() {
     let client = connect(config()).await.expect("connect");
     let cancel = Cancel::new();
     let mut stream = client
-        .stream_cancellable("/interface/listen", &Request::new(), &cancel)
+        .stream_with(
+            "/interface/listen",
+            &Request::new(),
+            &StreamOptions::new().cancel(cancel.clone()),
+        )
         .await
         .expect("stream");
 
