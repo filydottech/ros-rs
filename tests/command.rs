@@ -290,3 +290,36 @@ async fn a_reply_for_an_unknown_tag_is_a_protocol_error() {
         other => panic!("expected a protocol error, got {other:?}"),
     }
 }
+
+#[tokio::test]
+async fn created_id_reads_the_ret_attribute_and_never_guesses_the_path() {
+    let address = serve(|mut session| {
+        Box::pin(async move {
+            session.login().await;
+            for ret in [Some("=ret=*3"), None] {
+                let words = session.next().await.expect("command");
+                let tagged = format!(".tag={}", tag_of(&words));
+                match ret {
+                    Some(word) => session.send(&["!done", word, &tagged]).await,
+                    None => session.send(&["!done", &tagged]).await,
+                }
+            }
+            session.drain().await;
+        })
+    })
+    .await;
+
+    let client = connect(config(&address)).await.expect("connect");
+
+    let created = within(client.command("/ip/address/add", &Request::new()))
+        .await
+        .expect("add that returns ret");
+    assert_eq!(created.created_id(), Some("*3"));
+
+    // A reply without `ret` still succeeds: the client does not inspect the
+    // path, so only the caller can say whether a missing id is a failure.
+    let silent = within(client.command("/ip/address/add", &Request::new()))
+        .await
+        .expect("add without ret");
+    assert_eq!(silent.created_id(), None);
+}
