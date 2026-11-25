@@ -83,10 +83,10 @@ pub async fn connect(config: Config) -> Result<Client> {
     connect_cancellable(config, &Cancel::new()).await
 }
 
-/// Like [`connect`], with a caller-supplied cancellation token.
+/// Like [`crate::connect`], with a caller-supplied cancellation token.
 /// # Errors
 ///
-/// The categories are those of [`connect`], plus [`Error::Cancelled`] when the
+/// The categories are those of [`crate::connect`], plus [`Error::Cancelled`] when the
 /// token is already cancelled.
 pub async fn connect_cancellable(config: Config, cancel: &Cancel) -> Result<Client> {
     let config = config.normalized()?;
@@ -199,11 +199,12 @@ impl Client {
     /// Pending work and work submitted while the reconnect is in progress
     /// fail with [`Error::Reconnect`]. A failed reconnect leaves the client
     /// closed but retryable.
+    ///
     /// # Errors
     ///
     /// [`Error::Closed`] on a closed client, [`Error::Reconnect`] for a
     /// concurrent reconnect, and the dial and login categories of
-    /// [`connect`].
+    /// [`crate::connect`].
     pub async fn reconnect(&self, config: Config) -> Result<()> {
         self.reconnect_cancellable(config, &Cancel::new()).await
     }

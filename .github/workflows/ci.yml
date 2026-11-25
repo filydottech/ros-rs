@@ -1,0 +1,47 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  gate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@1.100.0
+        with:
+          components: rustfmt, clippy
+
+      - name: Formatting
+        run: cargo fmt --all --check
+
+      - name: Lints
+        run: cargo clippy --all-targets -- -D warnings
+
+      - name: Unit and integration tests
+        run: cargo test --all-targets
+
+      - name: Doctests
+        run: cargo test --doc
+
+      - name: Documentation
+        run: cargo doc --no-deps
+
+      - name: Tests without TLS
+        run: cargo clippy --no-default-features --all-targets -- -D warnings
+      - run: cargo test --no-default-features --all-targets
+      - run: cargo test --no-default-features --doc
+
+  package:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.100.0
+      - name: Package
+        run: cargo package

@@ -27,12 +27,22 @@ fn config() -> Config {
         config.port = port.parse().expect("ROS_PORT must be a port number");
     }
     if let Some(pem) = dotenv("ROS_CA_PEM") {
-        let bytes = std::fs::read(&pem).expect("ROS_CA_PEM must be readable");
-        config.tls = ros_rs::Tls::root_ca_pem(&bytes).expect("ROS_CA_PEM must hold a certificate");
+        apply_ca(&mut config, &pem);
     }
     config.command_timeout = Duration::from_secs(10);
     config.connect_timeout = Duration::from_secs(10);
     config
+}
+
+#[cfg(feature = "tls")]
+fn apply_ca(config: &mut Config, pem: &str) {
+    let bytes = std::fs::read(pem).expect("ROS_CA_PEM must be readable");
+    config.tls = ros_rs::Tls::root_ca_pem(&bytes).expect("ROS_CA_PEM must hold a certificate");
+}
+
+#[cfg(not(feature = "tls"))]
+fn apply_ca(_config: &mut Config, _pem: &str) {
+    panic!("ROS_CA_PEM requires the tls feature");
 }
 
 fn dotenv(key: &str) -> Option<String> {
