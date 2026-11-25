@@ -76,6 +76,12 @@ struct Submission {
     queue: Option<Queue>,
 }
 
+#[derive(Clone, Copy)]
+struct Deadline {
+    at: tokio::time::Instant,
+    duration: Duration,
+}
+
 /// A queued write.
 enum WriteJob {
     /// One tagged request, acknowledged once it reaches the socket.
@@ -368,21 +374,28 @@ impl Conn {
         timeout: Option<Duration>,
         op: &'static str,
     ) -> Result<CommandResult> {
-        let submission = self.core.submit(words, false, cancel, None, op).await?;
+        let timeout = timeout.unwrap_or_else(|| self.core.command_timeout());
+        let deadline = Deadline {
+            at: tokio::time::Instant::now() + timeout,
+            duration: timeout,
+        };
+        let submission = self
+            .core
+            .submit(words, false, cancel, None, Some(deadline), op)
+            .await?;
         let Submission {
             tag, completion, ..
         } = submission;
-        let timeout = timeout.unwrap_or_else(|| self.core.command_timeout());
         let outcome = tokio::select! {
             outcome = completion => outcome,
             () = cancel.cancelled() => {
                 self.core.cancel_tag(&tag, Fault::Cancelled);
                 return Err(Error::Cancelled);
             }
-            () = tokio::time::sleep(timeout) => {
+            () = tokio::time::sleep_until(deadline.at) => {
                 let fault = Fault::Timeout {
                     phase: "command",
-                    duration: timeout,
+                    duration: deadline.duration,
                 };
                 self.core.cancel_tag(&tag, fault.clone());
                 return Err(fault.to_error(op));
@@ -413,7 +426,10 @@ impl Conn {
         op: &'static str,
     ) -> Result<(String, Queue)> {
         let bounds = self.core.stream_bounds(overrides)?;
-        let submission = self.core.submit(words, true, cancel, bounds, op).await?;
+        let submission = self
+            .core
+            .submit(words, true, cancel, bounds, None, op)
+            .await?;
         match submission.queue {
             Some(queue) => Ok((submission.tag, queue)),
             None => Err(Error::Protocol {
@@ -488,6 +504,7 @@ impl Core {
         streaming: bool,
         cancel: &Cancel,
         bounds: Option<(usize, usize)>,
+        deadline: Option<Deadline>,
         op: &'static str,
     ) -> Result<Submission> {
         if cancel.is_cancelled() {
@@ -563,6 +580,17 @@ impl Core {
                 // The writer skips a request cancelled before it is committed.
                 self.cancel_tag(&tag, Fault::Cancelled);
                 return Err(Error::Cancelled);
+            }
+            () = tokio::time::sleep_until(
+                deadline.map_or_else(tokio::time::Instant::now, |deadline| deadline.at),
+            ), if deadline.is_some() => {
+                let deadline = deadline.expect("a deadline select branch requires a deadline");
+                let fault = Fault::Timeout {
+                    phase: "command",
+                    duration: deadline.duration,
+                };
+                self.cancel_tag(&tag, fault.clone());
+                return Err(fault.to_error(op));
             }
         };
 

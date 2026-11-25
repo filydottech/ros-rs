@@ -183,22 +183,23 @@ struct ClientInner {
     terminal: Option<Error>,
 }
 
-/// Dial and log in, bounded by `timeout` when the caller set one.
+/// Dial and log in within the call's effective deadline.
 async fn open_with_timeout(
     dial_options: crate::socket::DialOptions,
     config: &Config,
     cancel: &Cancel,
-    timeout: Option<Duration>,
+    timeout: Duration,
 ) -> Result<Conn> {
     let open = crate::transport::open(dial_options, config, cancel);
-    match timeout {
-        Some(timeout) => tokio::time::timeout(timeout, open)
-            .await
-            .map_err(|_elapsed| Error::Timeout {
+    tokio::select! {
+        biased;
+        result = tokio::time::timeout(timeout, open) => {
+            result.map_err(|_elapsed| Error::Timeout {
                 phase: "connect",
                 duration: timeout,
-            })?,
-        None => open.await,
+            })?
+        }
+        () = cancel.cancelled() => Err(Error::Cancelled),
     }
 }
 
@@ -232,10 +233,12 @@ pub async fn connect(config: Config) -> Result<Client> {
 /// token is already cancelled.
 pub async fn connect_with(config: Config, options: &CallOptions) -> Result<Client> {
     options.validate()?;
-    let config = config.normalized()?;
+    let mut config = config.normalized()?;
+    let timeout = options.timeout.unwrap_or(config.connect_timeout);
+    config.connect_timeout = timeout;
     let dial_options = crate::socket::DialOptions::from_config(&config);
     let cancel = options.token();
-    let conn = open_with_timeout(dial_options, &config, &cancel, options.timeout).await?;
+    let conn = open_with_timeout(dial_options, &config, &cancel, timeout).await?;
     let generation = Arc::new(conn);
     let mut config = config;
     config.forget_password();
@@ -391,7 +394,9 @@ impl Client {
             inner.state = State::Reconnecting;
             (inner.conn.take(), config)
         };
-        let (old, config) = old;
+        let (old, mut config) = old;
+        let timeout = options.timeout.unwrap_or(config.connect_timeout);
+        config.connect_timeout = timeout;
 
         // End the old generation before dialling so its pending work fails
         // with a reconnect error and its socket is released.
@@ -400,7 +405,7 @@ impl Client {
         }
 
         let dial_options = crate::socket::DialOptions::from_config(&config);
-        let opened = open_with_timeout(dial_options, &config, &cancel, options.timeout).await;
+        let opened = open_with_timeout(dial_options, &config, &cancel, timeout).await;
 
         let mut inner = self.inner.write().await;
         inner.reconnecting = false;
