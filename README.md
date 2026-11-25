@@ -237,6 +237,11 @@ leaves the client closed but retryable.
 `close()` is final and idempotent. Every operation after it fails with
 `Error::Closed`.
 
+`done()` resolves when the connection generation that was current when it was
+called ends: a `close()`, a fault, or a `reconnect` that replaced it. A later
+call awaits the next generation. Use it in a `select!` arm to stop unrelated
+work when the connection dies; `last_error()` then names the cause.
+
 ## Errors
 
 `Error` is `#[non_exhaustive]`; match the categories you handle and keep a

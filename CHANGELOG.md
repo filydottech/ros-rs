@@ -19,6 +19,8 @@ All notable changes to this crate are recorded here. The format follows
 - Cancellation through `Cancel`, `/cancel =tag=` on the wire, and zombie tags
   that absorb late replies instead of desynchronizing the connection.
 - `Client::reconnect`, which ends the old generation and never replays work.
+- `Client::done`, which resolves when the current generation ends, so a caller
+  can abandon its work in a `select!` instead of polling `state`.
 - TLS by default, verifying against the platform root store, a supplied root
   CA, or a complete `rustls::ClientConfig`.
 - `Query` expressions, `.proplist`, and raw query words as caller input.

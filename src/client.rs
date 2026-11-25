@@ -285,6 +285,20 @@ impl Client {
         inner.state
     }
 
+    /// Resolve when the current connection generation ends.
+    ///
+    /// It resolves after [`Client::close`], after the connection fails, and
+    /// after [`Client::reconnect`] replaces the generation that was current
+    /// when this call started. A client already closed resolves immediately.
+    /// Call it again to await the next generation. After it resolves,
+    /// [`Client::last_error`] names the cause when there was one.
+    pub async fn done(&self) {
+        let conn = { self.inner.read().await.conn.clone() };
+        if let Some(conn) = conn {
+            conn.wait_ended().await;
+        }
+    }
+
     /// The terminal error of the current generation, when one has been
     /// recorded.
     pub async fn last_error(&self) -> Option<Error> {

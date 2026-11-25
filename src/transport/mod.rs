@@ -424,6 +424,21 @@ impl Conn {
         self.core.terminal()
     }
 
+    /// Resolve when this generation ends: a fault, a close, or a reconnect.
+    ///
+    /// The receiver subscribes before it reads `terminal`, so an end that
+    /// happens between the two is observed rather than slept through.
+    pub(crate) async fn wait_ended(&self) {
+        let mut settled = {
+            let state = self.core.state.lock().unwrap();
+            state.settled.subscribe()
+        };
+        if self.core.terminal().is_some() {
+            return;
+        }
+        let _ = settled.changed().await;
+    }
+
     /// Ask the router to cancel `tag` and report when cleanup finishes.
     pub(crate) fn cancel_tag(&self, tag: &str, fault: Fault) -> oneshot::Receiver<()> {
         self.core.cancel_tag(tag, fault)
